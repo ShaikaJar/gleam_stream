@@ -32,7 +32,7 @@ fn save_call(
 ) {
   let reply_to = process.new_subject()
   process.send(subject, message(reply_to))
-  process.receive(reply_to, 1000)
+  process.receive(reply_to, 1000 * 1000 * 1000)
 }
 
 fn try_if_alive(
