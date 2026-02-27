@@ -97,7 +97,7 @@ fn handle_message(
   }
 
   case new_state {
-    // Finished -> actor.stop()
+    Finished -> actor.stop()
     _ -> actor.continue(new_state)
   }
 }
