@@ -3,6 +3,7 @@ import gleam/erlang/process
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
+import gleam/result
 
 type Message(t) {
   GetNext(reply_to: process.Subject(Option(t)))
@@ -25,32 +26,37 @@ pub opaque type Stream(t) {
   EmptyGenerator
 }
 
+fn save_call(
+  subject: process.Subject(Message(t)),
+  message: fn(process.Subject(r)) -> Message(t),
+) {
+  let reply_to = process.new_subject()
+  process.send(subject, message(reply_to))
+  process.receive(reply_to, 1000)
+}
+
 fn try_if_alive(
   generator: Stream(t),
   fallback: r,
-  if_alive: fn(process.Subject(Message(t)), process.Pid) -> r,
+  if_alive: fn(process.Subject(Message(t)), process.Pid) -> Result(r, Nil),
 ) -> r {
   case generator {
     EmptyGenerator -> fallback
     TrueGenerator(_, pid, _, _) -> {
-      case process.is_alive(pid) {
-        False -> fallback
-        True -> if_alive(generator.subject, generator.pid)
-      }
+      use <- bool.guard(process.is_alive(pid) |> bool.negate, fallback)
+      if_alive(generator.subject, generator.pid) |> result.unwrap(fallback)
     }
   }
 }
 
 pub fn has_next(generator: Stream(t)) -> Bool {
-  try_if_alive(generator, False, fn(subject, _) {
-    process.call_forever(subject, HasNext)
-  })
+  use subject, _ <- try_if_alive(generator, False)
+  save_call(subject, HasNext)
 }
 
 pub fn next(generator: Stream(t)) -> Option(t) {
-  try_if_alive(generator, None, fn(subject, _) {
-    process.call_forever(subject, GetNext)
-  })
+  use subject, _ <- try_if_alive(generator, None)
+  save_call(subject, GetNext)
 }
 
 fn handle_message(
@@ -102,8 +108,8 @@ fn handle_message(
 }
 
 fn create(
-  handle: fn(State(t), Message(t)) -> actor.Next(State(t), Message(t)),
   seed: fn() -> t,
+  handle: fn(State(t), Message(t)) -> actor.Next(State(t), Message(t)),
 ) {
   let assert Ok(my_actor) =
     actor.new(UnInitialized(seed))
@@ -119,13 +125,17 @@ fn create(
 
 // Helper-Function
 
+fn id(x: t) -> fn() -> t {
+  fn() { x }
+}
+
 pub fn generate_until(
-  seed: fn() -> t,
-  generate: fn(t) -> t,
-  until: fn(t) -> Bool,
+  seed seed: fn() -> t,
+  by generate: fn(t) -> t,
+  until until: fn(t) -> Bool,
 ) -> Stream(t) {
-  let handle = fn(x, y) { handle_message(generate, until, x, y) }
-  create(handle, seed)
+  use state, message <- create(seed)
+  handle_message(generate, until, state, message)
 }
 
 pub fn each(from: Stream(t), do: fn(t) -> Nil) -> Nil {
@@ -141,7 +151,8 @@ pub fn each(from: Stream(t), do: fn(t) -> Nil) -> Nil {
 // Java Stream api
 
 pub fn generate(seed: fn() -> t, by: fn(t) -> t) -> Stream(t) {
-  generate_until(seed, by, fn(_) { False })
+  use state, message <- create(seed)
+  handle_message(by, fn(_) { True }, state, message)
 }
 
 pub fn from_list(values: List(t)) -> Stream(t) {
@@ -149,7 +160,7 @@ pub fn from_list(values: List(t)) -> Stream(t) {
     [] -> EmptyGenerator
     [first, ..res] ->
       generate_until(
-        fn() { #(res, first) },
+        id(#(res, first)),
         fn(x) {
           let #(values, _) = x
           let assert [next, ..res] = values
@@ -165,11 +176,13 @@ pub fn from_list(values: List(t)) -> Stream(t) {
       )
   }
 
-  gen
-  |> map(fn(x) {
-    let #(_, cur) = x
-    cur
-  })
+  use #(_, cur) <- map(gen)
+  cur
+}
+
+fn assert_some(item: Option(t)) -> t {
+  let assert Some(item) = item
+  item
 }
 
 pub fn map(from: Stream(t), by: fn(t) -> r) -> Stream(r) {
@@ -177,14 +190,8 @@ pub fn map(from: Stream(t), by: fn(t) -> r) -> Stream(r) {
     False -> EmptyGenerator
     True -> {
       generate_until(
-        fn() {
-          let assert Some(first) = next(from)
-          first |> by()
-        },
-        fn(_) {
-          let assert Some(val) = next(from)
-          val |> by()
-        },
+        next(from) |> assert_some() |> by() |> id(),
+        fn(_) { next(from) |> assert_some() |> by() },
         fn(_) { has_next(from) |> bool.negate() },
       )
     }
@@ -196,65 +203,46 @@ pub fn empty() -> Stream(t) {
 }
 
 pub fn until(from: Stream(t), until: fn(t) -> Bool) {
-  case has_next(from) {
-    False -> EmptyGenerator
-    True -> {
-      generate_until(
-        fn() {
-          let assert Some(first) = next(from)
-          first
-        },
-        fn(_) {
-          let assert Some(val) = next(from)
-          val
-        },
-        until,
-      )
-    }
-  }
+  use first <- map_unwrap(next(from), id(EmptyGenerator))
+  generate_until(id(first), fn(_) { next(from) |> assert_some() }, until)
 }
 
 pub fn copy(original: Stream(t)) -> Stream(t) {
   case original {
     EmptyGenerator -> EmptyGenerator
     TrueGenerator(_, _, handle, seed) -> {
-      create(handle, seed)
+      create(seed, handle)
     }
   }
 }
 
 fn next_match(from: Stream(t), keeping predicate: fn(t) -> Bool) -> Option(t) {
-  case next(from) {
-    None -> None
-    Some(x) -> {
-      case predicate(x) {
-        True -> Some(x)
-        False -> next_match(from, predicate)
-      }
-    }
+  use x <- map_unwrap(next(from), id(None))
+  case predicate(x) {
+    True -> Some(x)
+    False -> next_match(from, predicate)
   }
 }
 
 pub fn filter(from: Stream(t), keeping predicate: fn(t) -> Bool) {
-  case next_match(from, predicate) {
-    None -> EmptyGenerator
-    Some(first) ->
-      generate_until(
-        fn() { #(first, next_match(from, predicate)) },
-        fn(a) {
-          let assert #(_, Some(cur)) = a
-          #(cur, next_match(from, predicate))
-        },
-        fn(a) {
-          let #(_, cur) = a
-          option.is_none(cur)
-        },
-      )
+  let next_val = fn() { next_match(from, predicate) }
+  let intermediate = {
+    use first <- map_unwrap(next_val(), id(EmptyGenerator))
+    generate_until(
+      fn() { #(first, next_val()) },
+      fn(a) {
+        let assert #(_, Some(cur)) = a
+        #(cur, next_val())
+      },
+      fn(a) {
+        let #(_, next) = a
+        option.is_none(next)
+      },
+    )
   }
-  |> map(fn(a) {
-    let #(cur, _) = a
-    cur
-  })
+
+  use #(cur, _) <- map(intermediate)
+  cur
 }
 
 pub fn fold(
@@ -262,68 +250,54 @@ pub fn fold(
   from initial: acc,
   with fun: fn(acc, t) -> acc,
 ) -> acc {
-  case next(stream) {
-    None -> initial
-    Some(x) -> fun(initial, x)
-  }
+  stream
+  |> next()
+  |> option.map(fun(initial, _))
+  |> option.map(fold(stream, _, fun))
+  |> option.unwrap(initial)
 }
 
 pub fn to_list(from: Stream(t)) -> List(t) {
   from |> fold([], list.prepend) |> list.reverse
 }
 
+fn map_unwrap(option: Option(t), or or: fn() -> r, by by: fn(t) -> r) -> r {
+  option
+  |> option.map(by)
+  |> option.lazy_unwrap(or)
+}
+
 fn indexed(stream: Stream(a)) -> Stream(#(a, Int)) {
-  case has_next(stream) {
-    False -> EmptyGenerator
-    True -> {
-      generate_until(
-        fn() {
-          let assert Some(first) = next(stream)
-          #(first, 0)
-        },
-        fn(a) {
-          let #(_, last_index) = a
-          let assert Some(val) = next(stream)
-          #(val, last_index + 1)
-        },
-        fn(_) { has_next(stream) |> bool.negate() },
-      )
-    }
-  }
+  use first <- map_unwrap(next(stream), empty)
+  use #(_, last_index) <- generate_until(fn() { #(first, 0) }, until: fn(_) {
+    has_next(stream) |> bool.negate()
+  })
+  let assert Some(val) = next(stream)
+  #(val, last_index + 1)
 }
 
 pub fn drop_while(
   in stream: Stream(a),
   satisfying predicate: fn(a) -> Bool,
 ) -> Stream(a) {
-  case next_match(stream, fn(x) { x |> predicate() |> bool.negate() }) {
-    None -> EmptyGenerator
-    Some(first) -> {
-      generate_until(
-        fn() { first },
-        fn(_) {
-          let assert Some(val) = next(stream)
-          val
-        },
-        fn(_) { has_next(stream) |> bool.negate() },
-      )
-    }
-  }
+  use first <- map_unwrap(
+    next_match(stream, fn(x) { x |> predicate() |> bool.negate() }),
+    empty,
+  )
+  use _ <- generate_until(seed: id(first), until: fn(_) {
+    has_next(stream) |> bool.negate()
+  })
+  let assert Some(val) = next(stream)
+  val
 }
 
 pub fn drop(from stream: Stream(a), up_to n: Int) -> Stream(a) {
-  indexed(stream)
-  |> drop_while(fn(a) {
-    let #(_, index) = a
-    case index {
-      i if i < n -> True
-      _ -> False
-    }
-  })
-  |> map(fn(a) {
-    let #(val, _) = a
-    val
-  })
+  let intermediate = {
+    use #(_, index) <- drop_while(indexed(stream))
+    index < n
+  }
+  use #(val, _) <- map(intermediate)
+  val
 }
 
 pub fn flat_map(
@@ -335,44 +309,32 @@ pub fn flat_map(
 
 pub fn flatten(streams: Stream(Stream(Int))) -> Stream(Int) {
   let next_stream = fn() { next_match(streams, has_next) }
+  use first_generator <- map_unwrap(next_stream(), empty)
 
-  let ib: Stream(#(Int, Stream(Int), Option(Stream(Int)))) = case
-    next_stream()
-  {
-    None -> EmptyGenerator
-    Some(first_generator) ->
-      generate_until(
-        fn() {
-          let assert Some(first_val) = next(first_generator)
-          #(first_val, first_generator, next_stream())
-        },
-        fn(x) {
-          let #(_, cur_stream, next_maybe) = x
-          case next(cur_stream) {
-            Some(val) -> {
-              #(val, cur_stream, next_maybe)
-            }
-            None -> {
-              let assert Some(cur_stream) = next_maybe
-              let assert Some(val) = next(cur_stream)
-              let next_maybe = next_stream()
-              #(val, cur_stream, next_maybe)
-            }
-          }
-        },
-        fn(x) {
-          let #(_, cur_stream, next_maybe) = x
-          let has_some =
-            has_next(cur_stream)
-            || next_maybe |> option.map(has_next) |> option.unwrap(False)
-          has_some |> bool.negate
-        },
-      )
-  }
+  let intermediate =
+    generate_until(
+      fn() {
+        let assert Some(first_val) = next(first_generator)
+        #(first_val, first_generator, next_stream())
+      },
+      fn(x) {
+        let #(_, cur_stream, next_maybe) = x
 
-  ib
-  |> map(fn(x) {
-    let #(val, _, _) = x
-    val
-  })
+        use <- map_unwrap(next(cur_stream), by: fn(val) {
+          #(val, cur_stream, next_maybe)
+        })
+        let assert Some(cur_stream) = next_maybe
+        let assert Some(val) = next(cur_stream)
+        #(val, cur_stream, next_stream())
+      },
+      fn(x) {
+        let #(_, cur_stream, next_maybe) = x
+        let has_some =
+          has_next(cur_stream)
+          || next_maybe |> option.map(has_next) |> option.unwrap(False)
+        has_some |> bool.negate
+      },
+    )
+  use #(val, _, _) <- map(intermediate)
+  val
 }
