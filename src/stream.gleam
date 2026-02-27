@@ -338,3 +338,27 @@ pub fn flatten(streams: Stream(Stream(Int))) -> Stream(Int) {
   use #(val, _, _) <- map(intermediate)
   val
 }
+
+pub fn window(stream: Stream(t), by n: Int) -> Stream(List(t)) {
+  let intermediate = {
+    use window <- generate_until(seed: fn() { [] }, until: fn(_) {
+      has_next(stream) |> bool.negate
+    })
+    case next(stream) {
+      None -> window
+      Some(x) -> {
+        let #(a, _) = window |> list.prepend(x) |> list.split(n)
+        a
+      }
+    }
+  }
+  intermediate
+  |> drop_while(fn(window) { list.length(window) < n })
+  |> map(list.reverse)
+}
+
+pub fn window_by_2(stream: Stream(t)) -> Stream(#(t, t)) {
+  use list <- map(window(stream, 2))
+  let assert [a, b] = list
+  #(a, b)
+}

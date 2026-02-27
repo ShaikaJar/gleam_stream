@@ -97,3 +97,24 @@ pub fn filter_test() {
     |> stream.filter(keep)
     |> stream.to_list()
 }
+
+pub fn window_test() {
+  let original_list = [1, 2, 3, 4, 6, 7, 8, 9, 10]
+  let by = 3
+
+  assert original_list |> list.window(by)
+    == original_list
+    |> stream.from_list()
+    |> stream.window(by)
+    |> stream.to_list()
+}
+
+pub fn window_by_2_test() {
+  let original_list = [1, 2, 3, 4, 6, 7, 8, 9, 10]
+
+  assert original_list |> list.window_by_2()
+    == original_list
+    |> stream.from_list()
+    |> stream.window_by_2()
+    |> stream.to_list()
+}
