@@ -1,6 +1,5 @@
 import gleam/bool
 import gleam/erlang/process
-import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
@@ -159,8 +158,8 @@ pub fn from_list(values: List(t)) -> Stream(t) {
         fn(x) {
           let #(values, _) = x
           case values {
-            [_, ..] -> True
-            _ -> False
+            [_, ..] -> False
+            _ -> True
           }
         },
       )
