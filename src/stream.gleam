@@ -186,16 +186,12 @@ fn assert_some(item: Option(t)) -> t {
 }
 
 pub fn map(from: Stream(t), by: fn(t) -> r) -> Stream(r) {
-  case has_next(from) {
-    False -> EmptyGenerator
-    True -> {
-      generate_until(
-        next(from) |> assert_some() |> by() |> id(),
-        fn(_) { next(from) |> assert_some() |> by() },
-        fn(_) { has_next(from) |> bool.negate() },
-      )
-    }
-  }
+  use first <- map_unwrap(next(from), id(EmptyGenerator))
+  generate_until(
+    seed: first |> by() |> id(),
+    by: fn(_) { next(from) |> assert_some() |> by() },
+    until: fn(_) { has_next(from) |> bool.negate() },
+  )
 }
 
 pub fn empty() -> Stream(t) {
