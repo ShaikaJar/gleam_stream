@@ -54,7 +54,7 @@ pub fn has_next(generator: Stream(t)) -> Bool {
   save_call(subject, HasNext)
 }
 
-pub fn next(generator: Stream(t)) -> Option(t) {
+fn get_next(generator: Stream(t)) -> Option(t) {
   use subject, _ <- try_if_alive(generator, None)
   save_call(subject, GetNext)
 }
@@ -139,7 +139,7 @@ pub fn generate_until(
 }
 
 pub fn each(from: Stream(t), do: fn(t) -> Nil) -> Nil {
-  case next(from) {
+  case get_next(from) {
     None -> Nil
     Some(val) -> {
       do(val)
@@ -152,7 +152,7 @@ pub fn each(from: Stream(t), do: fn(t) -> Nil) -> Nil {
 
 pub fn generate(seed: fn() -> t, by: fn(t) -> t) -> Stream(t) {
   use state, message <- create(seed)
-  handle_message(by, fn(_) { True }, state, message)
+  handle_message(by, fn(_) { False }, state, message)
 }
 
 pub fn from_list(values: List(t)) -> Stream(t) {
@@ -186,10 +186,10 @@ fn assert_some(item: Option(t)) -> t {
 }
 
 pub fn map(from: Stream(t), by: fn(t) -> r) -> Stream(r) {
-  use first <- map_unwrap(next(from), id(EmptyGenerator))
+  use first <- map_unwrap(get_next(from), id(EmptyGenerator))
   generate_until(
     seed: first |> by() |> id(),
-    by: fn(_) { next(from) |> assert_some() |> by() },
+    by: fn(_) { get_next(from) |> assert_some() |> by() },
     until: fn(_) { has_next(from) |> bool.negate() },
   )
 }
@@ -199,8 +199,8 @@ pub fn empty() -> Stream(t) {
 }
 
 pub fn until(from: Stream(t), until: fn(t) -> Bool) {
-  use first <- map_unwrap(next(from), id(EmptyGenerator))
-  generate_until(id(first), fn(_) { next(from) |> assert_some() }, until)
+  use first <- map_unwrap(get_next(from), id(EmptyGenerator))
+  generate_until(id(first), fn(_) { get_next(from) |> assert_some() }, until)
 }
 
 pub fn copy(original: Stream(t)) -> Stream(t) {
@@ -212,16 +212,22 @@ pub fn copy(original: Stream(t)) -> Stream(t) {
   }
 }
 
-fn next_match(from: Stream(t), keeping predicate: fn(t) -> Bool) -> Option(t) {
-  use x <- map_unwrap(next(from), id(None))
-  case predicate(x) {
-    True -> Some(x)
-    False -> next_match(from, predicate)
+fn next_matching(
+  from: Stream(t),
+  matching predicate: fn(t) -> Bool,
+) -> Option(t) {
+  case get_next(from) {
+    None -> None
+    Some(x) ->
+      case predicate(x) {
+        True -> Some(x)
+        False -> next_matching(from, predicate)
+      }
   }
 }
 
 pub fn filter(from: Stream(t), keeping predicate: fn(t) -> Bool) {
-  let next_val = fn() { next_match(from, predicate) }
+  let next_val = fn() { next_matching(from, predicate) }
   let intermediate = {
     use first <- map_unwrap(next_val(), id(EmptyGenerator))
     generate_until(
@@ -247,7 +253,7 @@ pub fn fold(
   with fun: fn(acc, t) -> acc,
 ) -> acc {
   stream
-  |> next()
+  |> get_next()
   |> option.map(fun(initial, _))
   |> option.map(fold(stream, _, fun))
   |> option.unwrap(initial)
@@ -264,11 +270,11 @@ fn map_unwrap(option: Option(t), or or: fn() -> r, by by: fn(t) -> r) -> r {
 }
 
 fn indexed(stream: Stream(a)) -> Stream(#(a, Int)) {
-  use first <- map_unwrap(next(stream), empty)
+  use first <- map_unwrap(get_next(stream), empty)
   use #(_, last_index) <- generate_until(fn() { #(first, 0) }, until: fn(_) {
     has_next(stream) |> bool.negate()
   })
-  let assert Some(val) = next(stream)
+  let assert Some(val) = get_next(stream)
   #(val, last_index + 1)
 }
 
@@ -277,13 +283,13 @@ pub fn drop_while(
   satisfying predicate: fn(a) -> Bool,
 ) -> Stream(a) {
   use first <- map_unwrap(
-    next_match(stream, fn(x) { x |> predicate() |> bool.negate() }),
+    next_matching(stream, fn(x) { x |> predicate() |> bool.negate() }),
     empty,
   )
   use _ <- generate_until(seed: id(first), until: fn(_) {
     has_next(stream) |> bool.negate()
   })
-  let assert Some(val) = next(stream)
+  let assert Some(val) = get_next(stream)
   val
 }
 
@@ -304,23 +310,23 @@ pub fn flat_map(
 }
 
 pub fn flatten(streams: Stream(Stream(Int))) -> Stream(Int) {
-  let next_stream = fn() { next_match(streams, has_next) }
+  let next_stream = fn() { next_matching(streams, has_next) }
   use first_generator <- map_unwrap(next_stream(), empty)
 
   let intermediate =
     generate_until(
       fn() {
-        let assert Some(first_val) = next(first_generator)
+        let assert Some(first_val) = get_next(first_generator)
         #(first_val, first_generator, next_stream())
       },
       fn(x) {
         let #(_, cur_stream, next_maybe) = x
 
-        use <- map_unwrap(next(cur_stream), by: fn(val) {
+        use <- map_unwrap(get_next(cur_stream), by: fn(val) {
           #(val, cur_stream, next_maybe)
         })
         let assert Some(cur_stream) = next_maybe
-        let assert Some(val) = next(cur_stream)
+        let assert Some(val) = get_next(cur_stream)
         #(val, cur_stream, next_stream())
       },
       fn(x) {
@@ -340,7 +346,7 @@ pub fn window(stream: Stream(t), by n: Int) -> Stream(List(t)) {
     use window <- generate_until(seed: fn() { [] }, until: fn(_) {
       has_next(stream) |> bool.negate
     })
-    case next(stream) {
+    case get_next(stream) {
       None -> window
       Some(x) -> {
         let #(a, _) = window |> list.prepend(x) |> list.split(n)
@@ -357,4 +363,8 @@ pub fn window_by_2(stream: Stream(t)) -> Stream(#(t, t)) {
   use list <- map(window(stream, 2))
   let assert [a, b] = list
   #(a, b)
+}
+
+pub fn next(from stream: Stream(t)) -> Option(t) {
+  next_matching(stream, fn(_) { True })
 }

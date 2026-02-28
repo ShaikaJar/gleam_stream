@@ -118,3 +118,13 @@ pub fn window_by_2_test() {
     |> stream.window_by_2()
     |> stream.to_list()
 }
+
+pub fn filter_next_test() {
+  let original_list = [1, 2, 3, 4, 6, 7, 8, 9, 10]
+  let next =
+    original_list
+    |> stream.from_list()
+    |> stream.filter(int.is_even)
+    |> stream.next()
+  assert Some(2) == next
+}
