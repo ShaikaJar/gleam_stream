@@ -32,7 +32,7 @@ fn save_call(
 ) {
   let reply_to = process.new_subject()
   process.send(subject, message(reply_to))
-  process.receive(reply_to, 1000 * 1000 * 1000)
+  process.receive(reply_to, 10_000)
 }
 
 fn try_if_alive(
@@ -91,13 +91,10 @@ fn handle_message(
       process.send(return_to, False)
       Finished
     }
-    UnInitialized(x), HasNext(return_to) -> {
+
+    _, HasNext(return_to) -> {
       process.send(return_to, True)
-      UnInitialized(x)
-    }
-    Generating(x), HasNext(return_to) -> {
-      process.send(return_to, True)
-      Generating(x)
+      state
     }
   }
 
