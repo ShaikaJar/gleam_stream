@@ -26,13 +26,18 @@ pub opaque type Stream(t) {
   EmptyGenerator
 }
 
+const timeout_has_next = 10
+
+const timeout_get_next = 10_000
+
 fn save_call(
   subject: process.Subject(Message(t)),
   message: fn(process.Subject(r)) -> Message(t),
+  wait_for ms: Int,
 ) {
   let reply_to = process.new_subject()
   process.send(subject, message(reply_to))
-  process.receive(reply_to, 10_000)
+  process.receive(reply_to, ms)
 }
 
 fn try_if_alive(
@@ -51,12 +56,12 @@ fn try_if_alive(
 
 pub fn has_next(generator: Stream(t)) -> Bool {
   use subject, _ <- try_if_alive(generator, False)
-  save_call(subject, HasNext)
+  save_call(subject, HasNext, timeout_has_next)
 }
 
 fn get_next(generator: Stream(t)) -> Option(t) {
   use subject, _ <- try_if_alive(generator, None)
-  save_call(subject, GetNext)
+  save_call(subject, GetNext, timeout_get_next)
 }
 
 fn handle_message(
@@ -364,4 +369,11 @@ pub fn window_by_2(stream: Stream(t)) -> Stream(#(t, t)) {
 
 pub fn next(from stream: Stream(t)) -> Option(t) {
   next_matching(stream, fn(_) { True })
+}
+
+pub fn pausing(for_ms d: Int) -> Stream(Int) {
+  generate(id(0), fn(x) {
+    process.sleep(d)
+    x + 1
+  })
 }
